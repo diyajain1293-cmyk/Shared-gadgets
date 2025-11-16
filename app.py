@@ -600,7 +600,7 @@ def clustering_tab(df_raw: pd.DataFrame):
     cluster_summary = df_clustered.groupby("Cluster")["Likelihood_Score"].agg(["mean", "count"]).rename(
         columns={"mean": "avg_likelihood", "count": "cluster_size"}
     )
-    st.dataframe(cluster_summary.style.format({"avg_likelihood": "{:.2f}"})
+    st.dataframe(cluster_summary.style.format({"avg_likelihood": "{:.2f}"}))
 
     st.caption(
         "Clusters with higher average likelihood scores and reasonable size represent attractive target segments "
