@@ -186,7 +186,7 @@ def train_and_evaluate_models(df: pd.DataFrame):
         # Confusion matrix figure (black & white, readable text)
         cm = confusion_matrix(y_test, y_test_pred)
         fig_cm, ax_cm = plt.subplots()
-        im = ax_cm.imshow(cm, cmap="Greys")
+        ax_cm.imshow(cm, cmap="Greys")
         ax_cm.set_title(f"Confusion Matrix - {name}")
         ax_cm.set_xlabel("Predicted label")
         ax_cm.set_ylabel("True label")
@@ -295,7 +295,7 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
         "Gradient Boosting Regressor": GradientBoostingRegressor(random_state=42),
     }
 
-    # For CV we need stratification, so we bin y
+    # Bin y for stratified CV
     y_binned = pd.qcut(y, q=5, duplicates="drop", labels=False)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
@@ -305,19 +305,25 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
     for name, model in models.items():
         pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
+        # Use r2, MAE, and MSE in CV (compute RMSE manually)
         cv_results = cross_validate(
             pipe,
             X,
             y,
             cv=cv.split(X, y_binned),
-            scoring=["r2", "neg_mean_absolute_error", "neg_root_mean_squared_error"],
+            scoring=["r2", "neg_mean_absolute_error", "neg_mean_squared_error"],
             return_train_score=False,
         )
 
+        cv_r2_mean = np.mean(cv_results["test_r2"])
+        cv_mae_mean = -np.mean(cv_results["test_neg_mean_absolute_error"])
+        cv_mse_mean = -np.mean(cv_results["test_neg_mean_squared_error"])
+        cv_rmse_mean = np.sqrt(cv_mse_mean)
+
         cv_rows[name] = {
-            "cv_r2_mean": np.mean(cv_results["test_r2"]),
-            "cv_mae_mean": -np.mean(cv_results["test_neg_mean_absolute_error"]),
-            "cv_rmse_mean": -np.mean(cv_results["test_neg_root_mean_squared_error"]),
+            "cv_r2_mean": cv_r2_mean,
+            "cv_mae_mean": cv_mae_mean,
+            "cv_rmse_mean": cv_rmse_mean,
         }
 
         # Fit on train/test split
@@ -331,8 +337,10 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
         train_mae = mean_absolute_error(y_train, y_train_pred)
         test_mae = mean_absolute_error(y_test, y_test_pred)
 
-        train_rmse = mean_squared_error(y_train, y_train_pred, squared=False)
-        test_rmse = mean_squared_error(y_test, y_test_pred, squared=False)
+        train_mse = mean_squared_error(y_train, y_train_pred)
+        test_mse = mean_squared_error(y_test, y_test_pred)
+        train_rmse = np.sqrt(train_mse)
+        test_rmse = np.sqrt(test_mse)
 
         metrics_rows.append(
             {
