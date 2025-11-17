@@ -811,37 +811,33 @@ def main():
         Instead of everyone buying rarely used gadgets, residents can borrow items such as cleaning appliances, tools,
         sports gear and camping equipment.
 
-
         This dashboard uses survey data to answer:
-
         - Who is interested in BorrowBox?
-
         - What equipment should we stock first?
-
         - How much are people willing to pay?
-
         - How can we predict likely users and segment them into clusters?
-
         - Which items are naturally bundled together using association rules?
-
+        - How strongly are people likely to use BorrowBox (regression on Likelihood Score)?
         """
     )
 
+    # Load data once
     df_raw = load_data()
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    [
-        "Market Insights",
-        "Model Performance",
-        "Predict on New Data",
-        "Clustering",
-        "Association Rules",
-        "Regression (Likelihood Score)",
-    ]
-)
+    # 6 tabs now (including regression)
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        [
+            "Market Insights",
+            "Model Performance",
+            "Predict on New Data",
+            "Clustering",
+            "Association Rules",
+            "Regression (Likelihood Score)",
+        ]
+    )
 
     # ----------------------
-    # Tab 1 – Insights
+    # Tab 1 – Market Insights
     # ----------------------
     with tab1:
         df_filtered, equipment_cols = apply_filters(df_raw)
@@ -852,9 +848,12 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         with col1:
             st.metric("Respondents (filtered)", len(df_filtered))
         with col2:
-            st.metric("% willing", f"{df_filtered['target_willing'].mean() * 100:.1f}%" if len(df_filtered) > 0 else "N/A")
-        with col3:
             if len(df_filtered) > 0:
+                st.metric("% willing", f"{df_filtered['target_willing'].mean() * 100:.1f}%")
+            else:
+                st.metric("% willing", "N/A")
+        with col3:
+            if len(df_filtered) > 0 and "Q1_Age_Group" in df_filtered.columns:
                 top_age = (
                     df_filtered.groupby("Q1_Age_Group")["target_willing"]
                     .mean()
@@ -868,7 +867,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         show_insight_charts(df_filtered, equipment_cols)
 
     # ----------------------
-    # Tab 2 – Model training
+    # Tab 2 – Model Performance (Classification)
     # ----------------------
     with tab2:
         st.subheader("Run classification models")
@@ -877,7 +876,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
             "to predict who is willing to use BorrowBox."
         )
 
-        if st.button("Run models"):
+        if st.button("Run classification models"):
             metrics_df, cv_df, confusion_figs, roc_fig, best_pipeline, feature_columns = train_and_evaluate_models(
                 df_raw
             )
@@ -910,10 +909,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
             st.markdown("### ROC curves for all models")
             st.pyplot(st.session_state["roc_fig"])
         else:
-            st.info("Models have not been run yet. Click **Run models** to see performance.")
+            st.info("Models have not been run yet. Click **Run classification models** to see performance.")
 
     # ----------------------
-    # Tab 3 – New data prediction
+    # Tab 3 – Predict on New Data
     # ----------------------
     with tab3:
         if "best_pipeline" not in st.session_state or "feature_columns" not in st.session_state:
@@ -937,16 +936,13 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     with tab5:
         association_rules_tab(df_raw)
 
-
-if __name__ == "__main__":
-    main()
     # ----------------------
-    # Tab 6 – Regression
+    # Tab 6 – Regression (Likelihood Score)
     # ----------------------
     with tab6:
         st.subheader("Regression: Predicting Likelihood Score (2–5)")
         st.markdown(
-            "Here we treat the Likelihood_Score as a numeric value and use regression models "
+            "Here we treat the **Likelihood_Score** as a numeric value and use regression models "
             "to predict how strongly a respondent is likely to use BorrowBox."
         )
 
@@ -972,3 +968,5 @@ if __name__ == "__main__":
             st.pyplot(st.session_state["reg_scatter_fig"])
         else:
             st.info("Click **Run regression models** to train the regression models.")
+if __name__ == "__main__":
+    main()
