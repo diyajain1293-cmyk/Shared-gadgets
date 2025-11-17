@@ -4,6 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import altair as alt
 
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
@@ -19,11 +24,10 @@ from sklearn.metrics import (
     roc_auc_score,
     confusion_matrix,
     roc_curve,
+    r2_score,
     mean_squared_error,
     mean_absolute_error,
-    r2_score,
 )
-
 
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -44,6 +48,7 @@ def load_data():
 def add_target_and_scores(df: pd.DataFrame) -> pd.DataFrame:
     """Create binary target and numeric likelihood score."""
     df = df.copy()
+
     positive = {
         "Definitely will use (5/5)",
         "Probably will use (4/5)",
@@ -54,23 +59,26 @@ def add_target_and_scores(df: pd.DataFrame) -> pd.DataFrame:
         "Probably will use (4/5)": 4,
         "Definitely will use (5/5)": 5,
     }
+
     df["target_willing"] = df["Q39_Likelihood_to_Use"].apply(
         lambda x: 1 if x in positive else 0
     )
     df["Likelihood_Score"] = df["Q39_Likelihood_to_Use"].map(score_map)
+
     return df
 
 
 def get_feature_matrix(df: pd.DataFrame):
-    """Return X, y and column lists for modelling."""
+    """Return X, y and column lists for classification modelling."""
     X = df.drop(
         columns=[
             "Q39_Likelihood_to_Use",
             "target_willing",
+            "Likelihood_Score",
             "Response_ID",
             "Timestamp",
-            "Likelihood_Score",
-        ]
+        ],
+        errors="ignore",
     )
     y = df["target_willing"]
 
@@ -80,11 +88,12 @@ def get_feature_matrix(df: pd.DataFrame):
 
 
 # =========================
-# Model training
+# Classification models
 # =========================
 
 def train_and_evaluate_models(df: pd.DataFrame):
-    """Train Decision Tree, Random Forest and Gradient Boosting models.
+    """
+    Train Decision Tree, Random Forest and Gradient Boosting classifiers.
 
     Returns:
         metrics_df: train & test metrics for each model
@@ -233,6 +242,12 @@ def train_and_evaluate_models(df: pd.DataFrame):
     feature_columns = X.columns.tolist()
 
     return metrics_df, cv_df, confusion_figs, roc_combined_fig, best_pipeline, feature_columns
+
+
+# =========================
+# Regression models
+# =========================
+
 def train_and_evaluate_regression_models(df: pd.DataFrame):
     """
     Train regression models to predict Likelihood_Score (2–5).
@@ -243,7 +258,6 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
         best_name: name of best model by test R2
         scatter_fig: matplotlib figure of predicted vs actual (best model)
     """
-    # Create numeric target
     df_mod = add_target_and_scores(df)
 
     y = df_mod["Likelihood_Score"]
@@ -281,20 +295,16 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
         "Gradient Boosting Regressor": GradientBoostingRegressor(random_state=42),
     }
 
+    # For CV we need stratification, so we bin y
+    y_binned = pd.qcut(y, q=5, duplicates="drop", labels=False)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     metrics_rows = []
     cv_rows = {}
 
-    from sklearn.model_selection import cross_validate
-
-    # For CV we need a dummy classification-like split, so we bin y a bit
-    y_binned = pd.qcut(y, q=5, duplicates="drop", labels=False)
-
     for name, model in models.items():
         pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-        # 5-fold CV with regression scoring
         cv_results = cross_validate(
             pipe,
             X,
@@ -303,15 +313,15 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
             scoring=["r2", "neg_mean_absolute_error", "neg_root_mean_squared_error"],
             return_train_score=False,
         )
+
         cv_rows[name] = {
             "cv_r2_mean": np.mean(cv_results["test_r2"]),
             "cv_mae_mean": -np.mean(cv_results["test_neg_mean_absolute_error"]),
             "cv_rmse_mean": -np.mean(cv_results["test_neg_root_mean_squared_error"]),
         }
 
-        # Fit and evaluate on train/test split
+        # Fit on train/test split
         pipe.fit(X_train, y_train)
-
         y_train_pred = pipe.predict(X_train)
         y_test_pred = pipe.predict(X_test)
 
@@ -361,6 +371,7 @@ def train_and_evaluate_regression_models(df: pd.DataFrame):
 
     return metrics_df, cv_df, best_name, fig_scatter
 
+
 # =========================
 # Filtering for insights
 # =========================
@@ -370,14 +381,18 @@ def apply_filters(df: pd.DataFrame):
 
     st.sidebar.header("Filters")
 
-    # Equipment columns (borrow/interest)
+    # Equipment columns
     equipment_cols = [col for col in df.columns if col.startswith("Q15_") or col.startswith("Q19_")]
     equipment_nice = {col: col.replace("Q15_", "").replace("Q19_", "") for col in equipment_cols}
+
+    default_labels = list(equipment_nice.values())
+    if len(default_labels) > 5:
+        default_labels = default_labels[:5]
 
     selected_labels = st.sidebar.multiselect(
         "Equipment people are willing to borrow/lend",
         options=list(equipment_nice.values()),
-        default=list(equipment_nice.values())[:5],
+        default=default_labels,
     )
     selected_cols = [col for col, nice in equipment_nice.items() if nice in selected_labels]
 
@@ -406,118 +421,142 @@ def show_insight_charts(df_filtered: pd.DataFrame, equipment_cols):
     if "target_willing" not in df_filtered.columns or "Likelihood_Score" not in df_filtered.columns:
         df_filtered = add_target_and_scores(df_filtered)
 
+    # 1. Age group vs willingness
     st.subheader("1. Age group vs willingness to use BorrowBox")
-    age_pref = (
-        df_filtered.groupby("Q1_Age_Group")["target_willing"]
-        .mean()
-        .reset_index(name="share_willing")
-        .sort_values("Q1_Age_Group")
-    )
-    chart_age = (
-        alt.Chart(age_pref)
-        .mark_bar()
-        .encode(
-            x=alt.X("Q1_Age_Group:N", title="Age group"),
-            y=alt.Y("share_willing:Q", title="Share willing to use"),
-            tooltip=["Q1_Age_Group", alt.Tooltip("share_willing", format=".2f")],
+    if "Q1_Age_Group" in df_filtered.columns:
+        age_pref = (
+            df_filtered.groupby("Q1_Age_Group")["target_willing"]
+            .mean()
+            .reset_index(name="share_willing")
+            .sort_values("Q1_Age_Group")
         )
-    )
-    st.altair_chart(chart_age, use_container_width=True)
-    st.caption(
-        "Younger age groups, especially 18–34, have a higher share of people willing to use BorrowBox. "
-        "This suggests our primary target segment is young adults."
-    )
+        chart_age = (
+            alt.Chart(age_pref)
+            .mark_bar()
+            .encode(
+                x=alt.X("Q1_Age_Group:N", title="Age group"),
+                y=alt.Y("share_willing:Q", title="Share willing to use"),
+                tooltip=["Q1_Age_Group", alt.Tooltip("share_willing", format=".2f")],
+            )
+        )
+        st.altair_chart(chart_age, use_container_width=True)
+        st.caption(
+            "Younger age groups, especially 18–34, have a higher share of people willing to use BorrowBox. "
+            "This suggests our primary target segment is young adults."
+        )
+    else:
+        st.info("Age group column not found in data.")
 
+    # 2. Subscription willingness by age
     st.subheader("2. Subscription willingness by age group (monthly fee)")
-    wtp_age = (
-        df_filtered.groupby(["Q1_Age_Group", "Q30_WTP_Monthly"])
-        .size()
-        .reset_index(name="count")
-    )
-    chart_wtp_age = (
-        alt.Chart(wtp_age)
-        .mark_bar()
-        .encode(
-            x=alt.X("Q1_Age_Group:N", title="Age group"),
-            y=alt.Y("count:Q", stack="normalize", title="Proportion"),
-            color=alt.Color("Q30_WTP_Monthly:N", title="Monthly subscription willingness"),
-            tooltip=["Q1_Age_Group", "Q30_WTP_Monthly", "count"],
+    if "Q1_Age_Group" in df_filtered.columns and "Q30_WTP_Monthly" in df_filtered.columns:
+        wtp_age = (
+            df_filtered.groupby(["Q1_Age_Group", "Q30_WTP_Monthly"])
+            .size()
+            .reset_index(name="count")
         )
-    )
-    st.altair_chart(chart_wtp_age, use_container_width=True)
-    st.caption(
-        "Different age segments show different willingness to pay. Younger users cluster in lower tiers, "
-        "while working professionals are more open to mid-level subscription prices."
-    )
+        chart_wtp_age = (
+            alt.Chart(wtp_age)
+            .mark_bar()
+            .encode(
+                x=alt.X("Q1_Age_Group:N", title="Age group"),
+                y=alt.Y("count:Q", stack="normalize", title="Proportion"),
+                color=alt.Color("Q30_WTP_Monthly:N", title="Monthly subscription willingness"),
+                tooltip=["Q1_Age_Group", "Q30_WTP_Monthly", "count"],
+            )
+        )
+        st.altair_chart(chart_wtp_age, use_container_width=True)
+        st.caption(
+            "Different age segments show different willingness to pay. Younger users cluster in lower tiers, "
+            "while working professionals are more open to mid-level subscription prices."
+        )
+    else:
+        st.info("Columns for age group or subscription willingness not found.")
 
+    # 3. Most popular equipment categories
     st.subheader("3. Most popular equipment categories")
-    eq_interest = (
-        df_filtered[equipment_cols]
-        .mean()
-        .sort_values(ascending=False)
-        .reset_index()
-        .rename(columns={"index": "equipment", 0: "interest_rate"})
-    )
-    eq_interest["equipment"] = (
-        eq_interest["equipment"]
-        .str.replace("Q15_", "", regex=False)
-        .str.replace("Q19_", "", regex=False)
-    )
-
-    chart_eq = (
-        alt.Chart(eq_interest.head(15))
-        .mark_bar()
-        .encode(
-            x=alt.X("interest_rate:Q", title="Share of respondents interested"),
-            y=alt.Y("equipment:N", sort="-x", title="Equipment"),
-            tooltip=["equipment", alt.Tooltip("interest_rate", format=".2f")],
+    if equipment_cols:
+        eq_interest = (
+            df_filtered[equipment_cols]
+            .mean()
+            .sort_values(ascending=False)
+            .reset_index()
+            .rename(columns={"index": "equipment", 0: "interest_rate"})
         )
-    )
-    st.altair_chart(chart_eq, use_container_width=True)
-    st.caption(
-        "Cleaning appliances, tools, sports gear and outdoor equipment appear at the top. "
-        "These should be prioritised when we build the initial BorrowBox inventory."
-    )
+        eq_interest["equipment"] = (
+            eq_interest["equipment"]
+            .str.replace("Q15_", "", regex=False)
+            .str.replace("Q19_", "", regex=False)
+        )
 
+        chart_eq = (
+            alt.Chart(eq_interest.head(15))
+            .mark_bar()
+            .encode(
+                x=alt.X("interest_rate:Q", title="Share of respondents interested"),
+                y=alt.Y("equipment:N", sort="-x", title="Equipment"),
+                tooltip=["equipment", alt.Tooltip("interest_rate", format=".2f")],
+            )
+        )
+        st.altair_chart(chart_eq, use_container_width=True)
+        st.caption(
+            "Cleaning appliances, tools, sports gear and outdoor equipment appear at the top. "
+            "These should be prioritised when we build the initial BorrowBox inventory."
+        )
+    else:
+        st.info("No equipment columns found for popularity chart.")
+
+    # 4. Income vs likelihood (heatmap)
     st.subheader("4. Income vs likelihood to use (heatmap)")
-    heat = (
-        df_filtered.groupby(["Q4_Monthly_Income", "Likelihood_Score"])
-        .size()
-        .reset_index(name="count")
-    )
-    chart_heat = (
-        alt.Chart(heat)
-        .mark_rect()
-        .encode(
-            x=alt.X("Q4_Monthly_Income:N", title="Monthly income"),
-            y=alt.Y("Likelihood_Score:O", title="Likelihood score"),
-            color=alt.Color("count:Q", title="Number of respondents"),
-            tooltip=["Q4_Monthly_Income", "Likelihood_Score", "count"],
+    if "Q4_Monthly_Income" in df_filtered.columns:
+        heat = (
+            df_filtered.groupby(["Q4_Monthly_Income", "Likelihood_Score"])
+            .size()
+            .reset_index(name="count")
         )
-    )
-    st.altair_chart(chart_heat, use_container_width=True)
-    st.caption(
-        "BorrowBox is attractive across several income groups, but low- to mid-income respondents show particularly strong interest, "
-        "as they benefit most from avoiding large one-off purchases."
-    )
+        chart_heat = (
+            alt.Chart(heat)
+            .mark_rect()
+            .encode(
+                x=alt.X("Q4_Monthly_Income:N", title="Monthly income"),
+                y=alt.Y("Likelihood_Score:O", title="Likelihood score"),
+                color=alt.Color("count:Q", title="Number of respondents"),
+                tooltip=["Q4_Monthly_Income", "Likelihood_Score", "count"],
+            )
+        )
+        st.altair_chart(chart_heat, use_container_width=True)
+        st.caption(
+            "BorrowBox is attractive across several income groups, but low- to mid-income respondents show particularly strong interest, "
+            "as they benefit most from avoiding large one-off purchases."
+        )
+    else:
+        st.info("Income column not found for heatmap.")
 
+    # 5. Need frequency vs likelihood (boxplot)
     st.subheader("5. Need frequency vs likelihood (boxplot)")
-    box_data = df_filtered[["Q11_Need_Frequency", "Likelihood_Score"]].dropna()
-    chart_box = (
-        alt.Chart(box_data)
-        .mark_boxplot()
-        .encode(
-            x=alt.X("Q11_Need_Frequency:N", title="How often do you need rarely used gadgets?"),
-            y=alt.Y("Likelihood_Score:Q", title="Likelihood / satisfaction score"),
-            tooltip=["Q11_Need_Frequency"],
-        )
-    )
-    st.altair_chart(chart_box, use_container_width=True)
-    st.caption(
-        "People who need such gadgets occasionally (for example once a month or a few times a year) "
-        "are more willing to use BorrowBox than people who almost never need them."
-    )
+    if "Q11_Need_Frequency" in df_filtered.columns:
+        box_data = df_filtered[["Q11_Need_Frequency", "Likelihood_Score"]].dropna()
+        if not box_data.empty:
+            chart_box = (
+                alt.Chart(box_data)
+                .mark_boxplot()
+                .encode(
+                    x=alt.X("Q11_Need_Frequency:N", title="How often do you need rarely used gadgets?"),
+                    y=alt.Y("Likelihood_Score:Q", title="Likelihood / satisfaction score"),
+                    tooltip=["Q11_Need_Frequency"],
+                )
+            )
+            st.altair_chart(chart_box, use_container_width=True)
+            st.caption(
+                "People who need such gadgets occasionally (for example once a month or a few times a year) "
+                "are more willing to use BorrowBox than people who almost never need them."
+            )
+        else:
+            st.info("Not enough data for boxplot.")
+    else:
+        st.info("Need frequency column not found.")
 
+    # 6. Accommodation type vs willingness
     st.subheader("6. Accommodation type vs willingness to use BorrowBox")
     if "Q8_Accommodation_Type" in df_filtered.columns:
         acc_pref = (
@@ -540,7 +579,10 @@ def show_insight_charts(df_filtered: pd.DataFrame, equipment_cols):
             "Residents in apartments or smaller units tend to be more willing to use BorrowBox than those in larger homes or villas, "
             "because they have less storage space and more motivation to share."
         )
+    else:
+        st.info("Accommodation type column not found.")
 
+    # 7. Storage space vs willingness
     st.subheader("7. Storage space at home vs willingness to use BorrowBox")
     if "Q10_Storage_Space" in df_filtered.columns:
         storage_pref = (
@@ -563,7 +605,10 @@ def show_insight_charts(df_filtered: pd.DataFrame, equipment_cols):
             "Households with limited or medium storage space are more interested in BorrowBox, confirming that space-saving "
             "is a key value proposition for the service."
         )
+    else:
+        st.info("Storage space column not found.")
 
+    # 8. Service features for high-likelihood users
     st.subheader("8. What matters most to high-likelihood users (service features)")
     service_cols = [c for c in df_filtered.columns if c.startswith("Q27_")]
     high_like = df_filtered[df_filtered["Likelihood_Score"] >= 4]
@@ -597,7 +642,7 @@ def show_insight_charts(df_filtered: pd.DataFrame, equipment_cols):
             "ease of booking are selected most often. These operational factors are critical to customer satisfaction."
         )
     else:
-        st.info("Not enough high-likelihood users in the current filter to show service feature importance.")
+        st.info("Not enough high-likelihood users or service feature columns for this chart.")
 
 
 # =========================
@@ -607,7 +652,7 @@ def show_insight_charts(df_filtered: pd.DataFrame, equipment_cols):
 def predict_on_new_data(best_pipeline, feature_columns, df_raw):
     st.subheader("Upload dataset to predict willingness")
 
-    sample = df_raw.head(10)[feature_columns]
+    sample = df_raw[feature_columns].head(10)
     csv_bytes = sample.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download sample input template",
@@ -660,12 +705,10 @@ def clustering_tab(df_raw: pd.DataFrame):
     st.markdown(
         """We use **K-Means clustering** to segment respondents into groups with similar characteristics.
 
-
-        Select the variables you want to cluster on and choose the number of clusters. We will show the cluster visualisation
-        using PCA (2D) and a small profile of each cluster."""
+Select the variables you want to cluster on and choose the number of clusters. We will show the cluster visualisation
+using PCA (2D) and a small profile of each cluster."""
     )
 
-    # Suggest a small set of features for clustering
     candidate_features = [
         "Likelihood_Score",
         "Q1_Age_Group",
@@ -687,7 +730,6 @@ def clustering_tab(df_raw: pd.DataFrame):
 
     n_clusters = st.slider("Number of clusters (K)", min_value=2, max_value=6, value=3)
 
-    # Prepare data
     cluster_df = df[selected_features].copy()
     cluster_df_encoded = pd.get_dummies(cluster_df, drop_first=True)
 
@@ -700,7 +742,6 @@ def clustering_tab(df_raw: pd.DataFrame):
     df_clustered = df.copy()
     df_clustered["Cluster"] = clusters
 
-    # PCA for 2D visualisation
     pca = PCA(n_components=2, random_state=42)
     coords = pca.fit_transform(X_scaled)
     df_clustered["PC1"] = coords[:, 0]
@@ -722,14 +763,8 @@ def clustering_tab(df_raw: pd.DataFrame):
 
     st.markdown("### Cluster profiles")
 
-    profile_cols = ["Cluster", "Likelihood_Score"]
-    for col in ["Q1_Age_Group", "Q4_Monthly_Income", "Q11_Need_Frequency", "Q30_WTP_Monthly"]:
-        if col in df_clustered.columns:
-            profile_cols.append(col)
-
-    # Aggregate some basic info: mean likelihood and top categories
-    cluster_summary = df_clustered.groupby("Cluster")["Likelihood_Score"].agg(["mean", "count"]).rename(
-        columns={"mean": "avg_likelihood", "count": "cluster_size"}
+    cluster_summary = df_clustered.groupby("Cluster")["Likelihood_Score"].agg(
+        avg_likelihood="mean", cluster_size="count"
     )
     st.dataframe(cluster_summary.style.format({"avg_likelihood": "{:.2f}"}))
 
@@ -751,13 +786,16 @@ def association_rules_tab(df_raw: pd.DataFrame):
     st.markdown(
         """We use **Association Rule Mining (Apriori)** to find patterns like:
 
-        *“People who are interested in borrowing X and Y are also likely to be interested in Z.”*
+*“People who are interested in borrowing X and Y are also likely to be interested in Z.”*
 
-
-        This can help design bundle offers, promotions and inventory combinations."""
+This can help design bundle offers, promotions and inventory combinations."""
     )
 
-    equipment_cols = [c for c in df.columns if c.startswith("Q15_") or c.startswith("Q17_") or c.startswith("Q19_") or c.startswith("Q21_")]
+    equipment_cols = [
+        c
+        for c in df.columns
+        if c.startswith("Q15_") or c.startswith("Q17_") or c.startswith("Q19_") or c.startswith("Q21_")
+    ]
     if not equipment_cols:
         st.info("No equipment columns found for association rule mining.")
         return
@@ -778,19 +816,30 @@ def association_rules_tab(df_raw: pd.DataFrame):
             st.warning("No rules found with the chosen lift threshold. Try lowering the minimum lift.")
             return
 
-        # Clean up itemset names
-        def format_itemset(itemset):
-            names = [col.replace("Q15_", "").replace("Q17_", "").replace("Q19_", "").replace("Q21_", "") for col in itemset]
-            return ", ".join(names)
+        def clean_name(name: str) -> str:
+            return (
+                name.replace("Q15_", "")
+                .replace("Q17_", "")
+                .replace("Q19_", "")
+                .replace("Q21_", "")
+            )
 
-        rules["antecedents_str"] = rules["antecedents"].apply(lambda x: format_itemset(list(x)))
-        rules["consequents_str"] = rules["consequents"].apply(lambda x: format_itemset(list(x)))
+        rules["antecedents_str"] = rules["antecedents"].apply(
+            lambda x: ", ".join(clean_name(c) for c in list(x))
+        )
+        rules["consequents_str"] = rules["consequents"].apply(
+            lambda x: ", ".join(clean_name(c) for c in list(x))
+        )
 
         display_cols = ["antecedents_str", "consequents_str", "support", "confidence", "lift"]
         rules_display = rules[display_cols].sort_values("lift", ascending=False)
 
         st.markdown("### Top association rules")
-        st.dataframe(rules_display.head(20).style.format({"support": "{:.3f}", "confidence": "{:.3f}", "lift": "{:.2f}"}))
+        st.dataframe(
+            rules_display.head(20).style.format(
+                {"support": "{:.3f}", "confidence": "{:.3f}", "lift": "{:.2f}"}
+            )
+        )
 
         st.caption(
             "These rules show which items tend to be liked together. For example, if many users who want a camping tent "
@@ -807,24 +856,23 @@ def main():
 
     st.markdown(
         """
-        BorrowBox is a **shared gadget library** concept for communities in places like Dubai Academic City and Silicon Oasis.
-        Instead of everyone buying rarely used gadgets, residents can borrow items such as cleaning appliances, tools,
-        sports gear and camping equipment.
+BorrowBox is a **shared gadget library** concept for communities in places like Dubai Academic City and Silicon Oasis.
+Instead of everyone buying rarely used gadgets, residents can borrow items such as cleaning appliances, tools,
+sports gear and camping equipment.
 
-        This dashboard uses survey data to answer:
-        - Who is interested in BorrowBox?
-        - What equipment should we stock first?
-        - How much are people willing to pay?
-        - How can we predict likely users and segment them into clusters?
-        - Which items are naturally bundled together using association rules?
-        - How strongly are people likely to use BorrowBox (regression on Likelihood Score)?
-        """
+This dashboard uses survey data to answer:
+- Who is interested in BorrowBox?
+- What equipment should we stock first?
+- How much are people willing to pay?
+- How can we predict likely users (classification)?
+- How strongly are they likely to use it (regression)?
+- How can we segment them into clusters?
+- Which items are naturally bundled together using association rules?
+"""
     )
 
-    # Load data once
     df_raw = load_data()
 
-    # 6 tabs now (including regression)
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [
             "Market Insights",
@@ -836,14 +884,11 @@ def main():
         ]
     )
 
-    # ----------------------
     # Tab 1 – Market Insights
-    # ----------------------
     with tab1:
         df_filtered, equipment_cols = apply_filters(df_raw)
         st.write(f"Filtered sample size: **{len(df_filtered)}** respondents")
 
-        # KPI cards
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Respondents (filtered)", len(df_filtered))
@@ -866,9 +911,7 @@ def main():
 
         show_insight_charts(df_filtered, equipment_cols)
 
-    # ----------------------
-    # Tab 2 – Model Performance (Classification)
-    # ----------------------
+    # Tab 2 – Classification: Model Performance
     with tab2:
         st.subheader("Run classification models")
         st.markdown(
@@ -877,9 +920,14 @@ def main():
         )
 
         if st.button("Run classification models"):
-            metrics_df, cv_df, confusion_figs, roc_fig, best_pipeline, feature_columns = train_and_evaluate_models(
-                df_raw
-            )
+            (
+                metrics_df,
+                cv_df,
+                confusion_figs,
+                roc_fig,
+                best_pipeline,
+                feature_columns,
+            ) = train_and_evaluate_models(df_raw)
             st.session_state["metrics_df"] = metrics_df
             st.session_state["cv_df"] = cv_df
             st.session_state["confusion_figs"] = confusion_figs
@@ -894,7 +942,6 @@ def main():
             st.markdown("### 5-fold cross-validation performance")
             st.dataframe(st.session_state["cv_df"].style.format("{:.3f}"))
 
-            # Identify best model
             best_model_name = st.session_state["metrics_df"]["test_roc_auc"].idxmax()
             st.markdown(
                 f"**Best model based on test ROC-AUC:** {best_model_name}. "
@@ -911,9 +958,7 @@ def main():
         else:
             st.info("Models have not been run yet. Click **Run classification models** to see performance.")
 
-    # ----------------------
     # Tab 3 – Predict on New Data
-    # ----------------------
     with tab3:
         if "best_pipeline" not in st.session_state or "feature_columns" not in st.session_state:
             st.info("Please run the models in the **Model Performance** tab first so we can use the best model.")
@@ -924,21 +969,15 @@ def main():
                 df_raw,
             )
 
-    # ----------------------
     # Tab 4 – Clustering
-    # ----------------------
     with tab4:
         clustering_tab(df_raw)
 
-    # ----------------------
     # Tab 5 – Association Rules
-    # ----------------------
     with tab5:
         association_rules_tab(df_raw)
 
-    # ----------------------
     # Tab 6 – Regression (Likelihood Score)
-    # ----------------------
     with tab6:
         st.subheader("Regression: Predicting Likelihood Score (2–5)")
         st.markdown(
@@ -968,5 +1007,7 @@ def main():
             st.pyplot(st.session_state["reg_scatter_fig"])
         else:
             st.info("Click **Run regression models** to train the regression models.")
+
+
 if __name__ == "__main__":
     main()
