@@ -4,12 +4,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import altair as alt
 
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    GradientBoostingClassifier,
+    RandomForestRegressor,
+    GradientBoostingRegressor,
+)
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -18,7 +19,11 @@ from sklearn.metrics import (
     roc_auc_score,
     confusion_matrix,
     roc_curve,
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
 )
+
 
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -228,7 +233,133 @@ def train_and_evaluate_models(df: pd.DataFrame):
     feature_columns = X.columns.tolist()
 
     return metrics_df, cv_df, confusion_figs, roc_combined_fig, best_pipeline, feature_columns
+def train_and_evaluate_regression_models(df: pd.DataFrame):
+    """
+    Train regression models to predict Likelihood_Score (2–5).
 
+    Returns:
+        metrics_df: train & test metrics (R2, MAE, RMSE) for each model
+        cv_df: 5-fold CV metrics
+        best_name: name of best model by test R2
+        scatter_fig: matplotlib figure of predicted vs actual (best model)
+    """
+    # Create numeric target
+    df_mod = add_target_and_scores(df)
+
+    y = df_mod["Likelihood_Score"]
+    X = df_mod.drop(
+        columns=[
+            "Q39_Likelihood_to_Use",
+            "target_willing",
+            "Likelihood_Score",
+            "Response_ID",
+            "Timestamp",
+        ],
+        errors="ignore",
+    )
+
+    categorical_cols = X.select_dtypes(include=["object"]).columns.tolist()
+    numeric_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols),
+            ("num", "passthrough", numeric_cols),
+        ]
+    )
+
+    models = {
+        "Linear Regression": LinearRegression(),
+        "Random Forest Regressor": RandomForestRegressor(random_state=42),
+        "Gradient Boosting Regressor": GradientBoostingRegressor(random_state=42),
+    }
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    metrics_rows = []
+    cv_rows = {}
+
+    from sklearn.model_selection import cross_validate
+
+    # For CV we need a dummy classification-like split, so we bin y a bit
+    y_binned = pd.qcut(y, q=5, duplicates="drop", labels=False)
+
+    for name, model in models.items():
+        pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+
+        # 5-fold CV with regression scoring
+        cv_results = cross_validate(
+            pipe,
+            X,
+            y,
+            cv=cv.split(X, y_binned),
+            scoring=["r2", "neg_mean_absolute_error", "neg_root_mean_squared_error"],
+            return_train_score=False,
+        )
+        cv_rows[name] = {
+            "cv_r2_mean": np.mean(cv_results["test_r2"]),
+            "cv_mae_mean": -np.mean(cv_results["test_neg_mean_absolute_error"]),
+            "cv_rmse_mean": -np.mean(cv_results["test_neg_root_mean_squared_error"]),
+        }
+
+        # Fit and evaluate on train/test split
+        pipe.fit(X_train, y_train)
+
+        y_train_pred = pipe.predict(X_train)
+        y_test_pred = pipe.predict(X_test)
+
+        train_r2 = r2_score(y_train, y_train_pred)
+        test_r2 = r2_score(y_test, y_test_pred)
+
+        train_mae = mean_absolute_error(y_train, y_train_pred)
+        test_mae = mean_absolute_error(y_test, y_test_pred)
+
+        train_rmse = mean_squared_error(y_train, y_train_pred, squared=False)
+        test_rmse = mean_squared_error(y_test, y_test_pred, squared=False)
+
+        metrics_rows.append(
+            {
+                "model": name,
+                "train_R2": train_r2,
+                "test_R2": test_r2,
+                "train_MAE": train_mae,
+                "test_MAE": test_mae,
+                "train_RMSE": train_rmse,
+                "test_RMSE": test_rmse,
+            }
+        )
+
+    metrics_df = pd.DataFrame(metrics_rows).set_index("model")
+    cv_df = pd.DataFrame.from_dict(cv_rows, orient="index")
+
+    # Pick best model by test R2
+    best_name = metrics_df["test_R2"].idxmax()
+    best_model = models[best_name]
+
+    # Refit best model to get predictions for scatter plot
+    best_pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", best_model)])
+    best_pipe.fit(X_train, y_train)
+    y_test_pred_best = best_pipe.predict(X_test)
+
+    # Predicted vs actual scatter plot
+    fig_scatter, ax_scatter = plt.subplots()
+    ax_scatter.scatter(y_test, y_test_pred_best, alpha=0.7)
+    min_val = min(y_test.min(), y_test_pred_best.min())
+    max_val = max(y_test.max(), y_test_pred_best.max())
+    ax_scatter.plot([min_val, max_val], [min_val, max_val], "k--")
+    ax_scatter.set_xlabel("Actual Likelihood Score")
+    ax_scatter.set_ylabel("Predicted Likelihood Score")
+    ax_scatter.set_title(f"Predicted vs Actual – {best_name}")
+    plt.tight_layout()
+
+    return metrics_df, cv_df, best_name, fig_scatter
 
 # =========================
 # Filtering for insights
@@ -698,15 +829,16 @@ def main():
 
     df_raw = load_data()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        [
-            "Market Insights",
-            "Model Performance",
-            "Predict on New Data",
-            "Clustering",
-            "Association Rules",
-        ]
-    )
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    [
+        "Market Insights",
+        "Model Performance",
+        "Predict on New Data",
+        "Clustering",
+        "Association Rules",
+        "Regression (Likelihood Score)",
+    ]
+)
 
     # ----------------------
     # Tab 1 – Insights
@@ -808,3 +940,35 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # ----------------------
+    # Tab 6 – Regression
+    # ----------------------
+    with tab6:
+        st.subheader("Regression: Predicting Likelihood Score (2–5)")
+        st.markdown(
+            "Here we treat the Likelihood_Score as a numeric value and use regression models "
+            "to predict how strongly a respondent is likely to use BorrowBox."
+        )
+
+        if st.button("Run regression models"):
+            reg_metrics_df, reg_cv_df, best_reg_name, scatter_fig = train_and_evaluate_regression_models(df_raw)
+            st.session_state["reg_metrics_df"] = reg_metrics_df
+            st.session_state["reg_cv_df"] = reg_cv_df
+            st.session_state["reg_best_name"] = best_reg_name
+            st.session_state["reg_scatter_fig"] = scatter_fig
+
+        if "reg_metrics_df" in st.session_state:
+            st.markdown("### Test set regression performance (R², MAE, RMSE)")
+            st.dataframe(st.session_state["reg_metrics_df"].style.format("{:.3f}"))
+
+            st.markdown("### 5-fold cross-validation performance")
+            st.dataframe(st.session_state["reg_cv_df"].style.format("{:.3f}"))
+
+            st.markdown(
+                f"**Best regression model by test R²:** {st.session_state['reg_best_name']}."
+            )
+
+            st.markdown("### Predicted vs Actual Likelihood Score (best model)")
+            st.pyplot(st.session_state["reg_scatter_fig"])
+        else:
+            st.info("Click **Run regression models** to train the regression models.")
